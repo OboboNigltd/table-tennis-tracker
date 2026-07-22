@@ -1,68 +1,78 @@
 import csv
 import os
+import time
 from datetime import datetime
-import requests
+from playwright.sync_api import sync_playwright
 
 CSV_FILE = "table_tennis_scores.csv"
 
-def fetch_github_tt_scores():
+def scrape_flashscore_table_tennis():
     """
-    Pulls structured table tennis score records directly from raw GitHub datasets/scrapers.
+    Uses Playwright to render Flashscore's Table Tennis daily schedule,
+    extracts active/finished match details, and formats them into structured rows.
     """
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Raw GitHub endpoint hosting table tennis match logs
-    url = "https://raw.githubusercontent.com/centralelyon/table-tennis-analytics/main/Data/Match_List.json"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-    }
-
     matches = []
 
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Extract match entries from the raw repository payload
-            for item in data[:10]:  # Limit to top 10 matches per sync
-                matches.append({
-                    "timestamp": timestamp,
-                    "event": item.get("tournament", "Table Tennis Circuit"),
-                    "player_1": item.get("player_1", "Player A"),
-                    "player_2": item.get("player_2", "Player B"),
-                    "set_1": item.get("set_1", "11-0"),
-                    "set_2": item.get("set_2", "11-0"),
-                    "set_3": item.get("set_3", "11-0"),
-                    "set_4": item.get("set_4", "-"),
-                    "set_5": item.get("set_5", "-"),
-                    "total_p1_points": item.get("p1_total", 33),
-                    "total_p2_points": item.get("p2_total", 0)
-                })
-        else:
-            # Fallback data structure if the raw stream updates its schema
-            matches = [{
-                "timestamp": timestamp,
-                "event": "GitHub TT Dataset Sync",
-                "player_1": "Player A",
-                "player_2": "Player B",
-                "set_1": "11-8",
-                "set_2": "9-11",
-                "set_3": "11-7",
-                "set_4": "11-9",
-                "set_5": "-",
-                "total_p1_points": 42,
-                "total_p2_points": 35
-            }]
+    print("Launching Playwright browser...")
+    with sync_playwright() as p:
+        # Launch headless Chromium
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
 
-    except Exception as e:
-        print(f"Error reading GitHub TT database: {e}")
+        # Navigate to Flashscore Table Tennis main page
+        url = "https://www.flashscore.com/table-tennis/"
+        print(f"Navigating to {url}...")
+        
+        try:
+            page.goto(url, timeout=30000)
+            # Give dynamic JavaScript elements time to load
+            time.sleep(5)
+
+            # Locate match events on the page
+            event_rows = page.query_selector_all(".event__match")
+            print(f"Found {len(event_rows)} matches on page.")
+
+            for row in event_rows[:10]:  # Capture top 10 matches on page
+                try:
+                    home_player = row.query_selector(".event__homeParticipant")
+                    away_player = row.query_selector(".event__awayParticipant")
+                    p1_name = home_player.inner_text().strip() if home_player else "Player A"
+                    p2_name = away_player.inner_text().strip() if away_player else "Player B"
+
+                    # Get set score breakdown
+                    p1_scores = row.query_selector_all(".event__part--home")
+                    p2_scores = row.query_selector_all(".event__part--away")
+
+                    set_1 = f"{p1_scores[0].inner_text()}-{p2_scores[0].inner_text()}" if len(p1_scores) > 0 else "-"
+                    set_2 = f"{p1_scores[1].inner_text()}-{p2_scores[1].inner_text()}" if len(p1_scores) > 1 else "-"
+                    set_3 = f"{p1_scores[2].inner_text()}-{p2_scores[2].inner_text()}" if len(p1_scores) > 2 else "-"
+                    set_4 = f"{p1_scores[3].inner_text()}-{p2_scores[3].inner_text()}" if len(p1_scores) > 3 else "-"
+                    set_5 = f"{p1_scores[4].inner_text()}-{p2_scores[4].inner_text()}" if len(p1_scores) > 4 else "-"
+
+                    matches.append({
+                        "timestamp": timestamp,
+                        "event": "Flashscore Live Fixture",
+                        "player_1": p1_name,
+                        "player_2": p2_name,
+                        "set_1": set_1,
+                        "set_2": set_2,
+                        "set_3": set_3,
+                        "set_4": set_4,
+                        "set_5": set_5,
+                        "total_p1_points": 0,
+                        "total_p2_points": 0
+                    })
+                except Exception as inner_e:
+                    print(f"Error parsing row: {inner_e}")
+                    continue
+
+        except Exception as e:
+            print(f"Failed to fetch Flashscore page: {e}")
+
+        browser.close()
 
     return matches
-
 
 def save_to_csv(matches):
     fieldnames = [
@@ -79,8 +89,10 @@ def save_to_csv(matches):
             writer.writeheader()
         if matches:
             writer.writerows(matches)
-            print(f"Successfully added {len(matches)} match rows into {CSV_FILE}.")
+            print(f"Successfully recorded {len(matches)} Flashscore match entries.")
+        else:
+            print("No match entries extracted during this run.")
 
 if __name__ == "__main__":
-    scores = fetch_github_tt_scores()
-    save_to_csv(scores)
+    match_data = scrape_flashscore_table_tennis()
+    save_to_csv(match_data)
