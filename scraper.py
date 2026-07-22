@@ -1,140 +1,85 @@
 import csv
-import json
 import os
-import time
+import requests
 from datetime import datetime
-from google import genai
-from google.genai import types
-from playwright.sync_api import sync_playwright
 
 CSV_FILE = "table_tennis_scores.csv"
 
-def extract_matches_with_llm(raw_text):
+def fetch_sofascore_table_tennis():
     """
-    Sends rendered text to Gemini API to structure match data,
-    full-time scores, set-by-set points, and calculate point totals.
+    Fetches live and completed table tennis events from Sofascore's public REST API.
+    Includes full-time scores, set-by-set breakdowns, and player details.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY environment variable is missing.")
-        return []
-
-    client = genai.Client(api_key=api_key)
-
-    prompt = f"""
-    Analyze the following raw table tennis page content and extract all matches.
-    
-    For each match, extract:
-    - event: Tournament or league category name
-    - player_1: First player name and country code (e.g. 'Shim J. (Bra)')
-    - player_2: Second player name and country code (e.g. 'Haug B. (Nor)')
-    - full_time_score: Overall match set score (e.g., '3-1', '0-3') or '-' if upcoming
-    - set_1: Set 1 points score (e.g., '11-8') or '-'
-    - set_2: Set 2 points score (e.g., '9-11') or '-'
-    - set_3: Set 3 points score or '-'
-    - set_4: Set 4 points score or '-'
-    - set_5: Set 5 points score or '-'
-
-    Raw Page Content:
-    {raw_text[:15000]}
-    """
-
-    response_schema = types.Schema(
-        type=types.Type.ARRAY,
-        items=types.Schema(
-            type=types.Type.OBJECT,
-            properties={
-                "event": types.Schema(type=types.Type.STRING),
-                "player_1": types.Schema(type=types.Type.STRING),
-                "player_2": types.Schema(type=types.Type.STRING),
-                "full_time_score": types.Schema(type=types.Type.STRING),
-                "set_1": types.Schema(type=types.Type.STRING),
-                "set_2": types.Schema(type=types.Type.STRING),
-                "set_3": types.Schema(type=types.Type.STRING),
-                "set_4": types.Schema(type=types.Type.STRING),
-                "set_5": types.Schema(type=types.Type.STRING),
-            },
-            required=["event", "player_1", "player_2", "full_time_score"]
-        )
-    )
+    url = "https://api.sofascore.com/api/v1/sport/table-tennis/events/live"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.sofascore.com/",
+        "Origin": "https://www.sofascore.com"
+    }
 
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema,
-                temperature=0.1,
-            ),
-        )
-        return json.loads(response.text)
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            events = data.get("events", [])
+            print(f"Retrieved {len(events)} live/recent table tennis matches from Sofascore.")
+            return events
+        else:
+            print(f"Sofascore endpoint returned status code: {response.status_code}")
+            return []
     except Exception as e:
-        print(f"LLM Parsing Error: {e}")
+        print(f"Connection error fetching Sofascore feed: {e}")
         return []
 
-
-def run_pipeline():
+def parse_sofascore_events(events):
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    formatted_matches = []
+    parsed_matches = []
 
-    print(f"[{timestamp}] Starting Playwright browser session...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        page = context.new_page()
+    for event in events:
+        tournament_name = event.get("tournament", {}).get("name", "Table Tennis Event")
+        category_name = event.get("tournament", {}).get("category", {}).get("name", "")
+        full_event = f"{category_name} - {tournament_name}".strip(" - ")
 
-        # Target mobile stream page which renders cleanly in Playwright
-        target_url = "https://m.flashscore.com/table-tennis/"
-        print(f"Navigating to {target_url}...")
+        home_player = event.get("homeTeam", {}).get("name", "Player 1")
+        away_player = event.get("awayTeam", {}).get("name", "Player 2")
 
-        try:
-            page.goto(target_url, timeout=45000, wait_until="domcontentloaded")
-            time.sleep(5)
+        # Overall sets score
+        home_score = event.get("homeScore", {}).get("current", 0)
+        away_score = event.get("awayScore", {}).get("current", 0)
+        full_time_score = f"{home_score}-{away_score}"
 
-            raw_content = page.inner_text("body")
-            print("Successfully retrieved page DOM. Sending to Gemini LLM...")
+        # Individual set breakdown
+        home_period = event.get("homeScore", {})
+        away_period = event.get("awayScore", {})
 
-            extracted_data = extract_matches_with_llm(raw_content)
-            print(f"Gemini LLM extracted {len(extracted_data)} structured match records.")
+        set_1 = f"{home_period.get('period1', '-')}-{away_period.get('period1', '-')}" if 'period1' in home_period else "-"
+        set_2 = f"{home_period.get('period2', '-')}-{away_period.get('period2', '-')}" if 'period2' in home_period else "-"
+        set_3 = f"{home_period.get('period3', '-')}-{away_period.get('period3', '-')}" if 'period3' in home_period else "-"
+        set_4 = f"{home_period.get('period4', '-')}-{away_period.get('period4', '-')}" if 'period4' in home_period else "-"
+        set_5 = f"{home_period.get('period5', '-')}-{away_period.get('period5', '-')}" if 'period5' in home_period else "-"
 
-            for m in extracted_data:
-                # Calculate total points scored per player across sets
-                p1_total, p2_total = 0, 0
-                for s_key in ["set_1", "set_2", "set_3", "set_4", "set_5"]:
-                    s_val = m.get(s_key, "-")
-                    if s_val and "-" in s_val and s_val != "-":
-                        try:
-                            pts1, pts2 = map(int, s_val.split("-"))
-                            p1_total += pts1
-                            p2_total += pts2
-                        except ValueError:
-                            pass
+        # Calculate sum of points scored per player
+        p1_pts = sum([home_period.get(f'period{i}', 0) for i in range(1, 6) if isinstance(home_period.get(f'period{i}'), int)])
+        p2_pts = sum([away_period.get(f'period{i}', 0) for i in range(1, 6) if isinstance(away_period.get(f'period{i}'), int)])
 
-                formatted_matches.append({
-                    "timestamp": timestamp,
-                    "event": m.get("event", "Table Tennis Tournament"),
-                    "player_1": m.get("player_1", ""),
-                    "player_2": m.get("player_2", ""),
-                    "full_time_score": m.get("full_time_score", "-"),
-                    "set_1": m.get("set_1", "-"),
-                    "set_2": m.get("set_2", "-"),
-                    "set_3": m.get("set_3", "-"),
-                    "set_4": m.get("set_4", "-"),
-                    "set_5": m.get("set_5", "-"),
-                    "total_p1_points": p1_total,
-                    "total_p2_points": p2_total
-                })
+        parsed_matches.append({
+            "timestamp": timestamp,
+            "event": full_event,
+            "player_1": home_player,
+            "player_2": away_player,
+            "full_time_score": full_time_score,
+            "set_1": set_1,
+            "set_2": set_2,
+            "set_3": set_3,
+            "set_4": set_4,
+            "set_5": set_5,
+            "total_p1_points": p1_pts,
+            "total_p2_points": p2_pts
+        })
 
-        except Exception as e:
-            print(f"Browser Execution Error: {e}")
-
-        browser.close()
-
-    return formatted_matches
-
+    return parsed_matches
 
 def save_to_csv(matches):
     fieldnames = [
@@ -151,11 +96,11 @@ def save_to_csv(matches):
             writer.writeheader()
         if matches:
             writer.writerows(matches)
-            print(f"Successfully saved {len(matches)} rows to {CSV_FILE}.")
+            print(f"Successfully recorded {len(matches)} match rows to {CSV_FILE}.")
         else:
-            print("No match rows extracted during this run.")
-
+            print("No match rows retrieved on this cycle.")
 
 if __name__ == "__main__":
-    matches = run_pipeline()
-    save_to_csv(matches)
+    raw_events = fetch_sofascore_table_tennis()
+    processed_matches = parse_sofascore_events(raw_events)
+    save_to_csv(processed_matches)
