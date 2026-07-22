@@ -1,44 +1,61 @@
 import csv
 import json
 import os
-import time
+import requests
 from datetime import datetime
 from google import genai
 from google.genai import types
-from playwright.sync_api import sync_playwright
 
 CSV_FILE = "table_tennis_scores.csv"
 
-def extract_matches_with_llm(raw_text):
+def fetch_table_tennis_live_data():
     """
-    Passes raw schedule text to Gemini API using Structured Output
-    to enforce clean, standardized JSON extraction.
+    Fetches live table tennis events directly from Sofascore/Flashscore API endpoints
+    which include set-by-set point breakdowns natively.
+    """
+    url = "https://api.sofascore.com/api/v1/sport/table-tennis/events/live"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        print(f"Direct API fetch error: {e}")
+    return None
+
+
+def parse_and_format_with_llm(raw_json_data):
+    """
+    Uses Gemini LLM to interpret the raw sports payload, standardize player names,
+    extract set breakdowns (Set 1-5), and calculate total scores.
     """
     api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Warning: GEMINI_API_KEY environment variable not set.")
+    if not api_key or not raw_json_data:
         return []
 
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-    Analyze the following raw table tennis page content and extract all matches.
-    For each match, return:
-    - event: Tournament or category name
-    - player_1: First player's full name and country code
-    - player_2: Second player's full name and country code
-    - full_time_score: Overall set score (e.g., '3-1', '0-3') or '-' if not started
-    - set_1: Set 1 point score (e.g., '11-8') or '-'
-    - set_2: Set 2 point score (e.g., '9-11') or '-'
-    - set_3: Set 3 point score or '-'
-    - set_4: Set 4 point score or '-'
-    - set_5: Set 5 point score or '-'
+    Analyze the following raw sports JSON payload for table tennis matches.
+    Extract every match and transform it into a structured list where each object has:
+    - event: Category or tournament name
+    - player_1: Home player full name and country code (e.g. 'Shim J. (Bra)')
+    - player_2: Away player full name and country code (e.g. 'Haug B. (Nor)')
+    - full_time_score: Overall sets score (e.g. '3-1', '0-3', '0-0')
+    - set_1: Set 1 point breakdown (e.g. '11-8') or '-'
+    - set_2: Set 2 point breakdown (e.g. '9-11') or '-'
+    - set_3: Set 3 point breakdown or '-'
+    - set_4: Set 4 point breakdown or '-'
+    - set_5: Set 5 point breakdown or '-'
 
-    Raw Page Text:
-    {raw_text[:12000]}
+    Raw Data Payload:
+    {json.dumps(raw_json_data)[:15000]}
     """
 
-    # Enforce strict JSON Schema output
     response_schema = types.Schema(
         type=types.Type.ARRAY,
         items=types.Schema(
@@ -70,90 +87,65 @@ def extract_matches_with_llm(raw_text):
         )
         return json.loads(response.text)
     except Exception as e:
-        print(f"LLM extraction error: {e}")
+        print(f"LLM Parsing Error: {e}")
         return []
 
 
-def run_llm_pipeline():
+def main():
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    formatted_matches = []
+    print(f"[{timestamp}] Starting Table Tennis Scraper...")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15"
-        )
-        page = context.new_page()
+    raw_data = fetch_table_tennis_live_data()
+    if not raw_data:
+        print("No live data returned from feed.")
+        return
 
-        target_url = "https://m.flashscore.com/table-tennis/"
-        print(f"Fetching page from {target_url}...")
-        
-        try:
-            page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
-            time.sleep(4)
+    extracted_matches = parse_and_format_with_llm(raw_data)
+    print(f"LLM successfully parsed {len(extracted_matches)} match records.")
 
-            raw_text = page.inner_text("body")
-            print("Sending raw content to LLM for parsing...")
-            
-            raw_matches = extract_matches_with_llm(raw_text)
-            print(f"LLM returned {len(raw_matches)} structured match entries.")
+    formatted_rows = []
+    for m in extracted_matches:
+        p1_total, p2_total = 0, 0
+        for s_key in ["set_1", "set_2", "set_3", "set_4", "set_5"]:
+            s_val = m.get(s_key, "-")
+            if s_val and "-" in s_val and s_val != "-":
+                try:
+                    p1, p2 = map(int, s_val.split("-"))
+                    p1_total += p1
+                    p2_total += p2
+                except ValueError:
+                    pass
 
-            for m in raw_matches:
-                # Calculate point sums across sets
-                p1_total, p2_total = 0, 0
-                for s_key in ["set_1", "set_2", "set_3", "set_4", "set_5"]:
-                    s_val = m.get(s_key, "-")
-                    if s_val and "-" in s_val and s_val != "-":
-                        try:
-                            pts1, pts2 = map(int, s_val.split("-"))
-                            p1_total += pts1
-                            p2_total += pts2
-                        except ValueError:
-                            pass
+        formatted_rows.append({
+            "timestamp": timestamp,
+            "event": m.get("event", "Table Tennis Event"),
+            "player_1": m.get("player_1", ""),
+            "player_2": m.get("player_2", ""),
+            "full_time_score": m.get("full_time_score", "-"),
+            "set_1": m.get("set_1", "-"),
+            "set_2": m.get("set_2", "-"),
+            "set_3": m.get("set_3", "-"),
+            "set_4": m.get("set_4", "-"),
+            "set_5": m.get("set_5", "-"),
+            "total_p1_points": p1_total,
+            "total_p2_points": p2_total
+        })
 
-                formatted_matches.append({
-                    "timestamp": timestamp,
-                    "event": m.get("event", "Table Tennis Tournament"),
-                    "player_1": m.get("player_1", ""),
-                    "player_2": m.get("player_2", ""),
-                    "full_time_score": m.get("full_time_score", "-"),
-                    "set_1": m.get("set_1", "-"),
-                    "set_2": m.get("set_2", "-"),
-                    "set_3": m.get("set_3", "-"),
-                    "set_4": m.get("set_4", "-"),
-                    "set_5": m.get("set_5", "-"),
-                    "total_p1_points": p1_total,
-                    "total_p2_points": p2_total
-                })
-
-        except Exception as e:
-            print(f"Pipeline error: {e}")
-
-        browser.close()
-
-    return formatted_matches
-
-
-def save_to_csv(matches):
     fieldnames = [
-        "timestamp", "event", "player_1", "player_2", 
-        "full_time_score", "set_1", "set_2", "set_3", 
+        "timestamp", "event", "player_1", "player_2",
+        "full_time_score", "set_1", "set_2", "set_3",
         "set_4", "set_5", "total_p1_points", "total_p2_points"
     ]
-    
-    file_exists = os.path.isfile(CSV_FILE)
 
+    file_exists = os.path.isfile(CSV_FILE)
     with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not file_exists:
             writer.writeheader()
-        if matches:
-            writer.writerows(matches)
-            print(f"Successfully recorded {len(matches)} match rows to {CSV_FILE}.")
-        else:
-            print("No new match entries captured.")
+        if formatted_rows:
+            writer.writerows(formatted_rows)
+            print(f"Appended {len(formatted_rows)} rows to {CSV_FILE}.")
 
 
 if __name__ == "__main__":
-    extracted_data = run_llm_pipeline()
-    save_to_csv(extracted_data)
+    main()
