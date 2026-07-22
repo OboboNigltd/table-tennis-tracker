@@ -9,13 +9,13 @@ CSV_FILE = "table_tennis_scores.csv"
 
 def scrape_mobile_flashscore():
     """
-    Scrapes real live and finished table tennis matches from Mobile Flashscore
-    and uses Regex to cleanly parse Event, Players, and Set Scores into CSV columns.
+    Scrapes real table tennis matches from Mobile Flashscore, handling multi-line
+    player and score elements cleanly.
     """
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     matches = []
 
-    print("Launching Playwright for Mobile Flashscore...")
+    print("Launching Playwright browser for Mobile Flashscore...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -28,31 +28,34 @@ def scrape_mobile_flashscore():
         
         try:
             page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
-            time.sleep(3)
+            time.sleep(4)
 
-            # Get raw text content of the score table
+            # Get full text content line-by-line
             body_text = page.inner_text("body")
             lines = [line.strip() for line in body_text.split("\n") if line.strip()]
 
-            current_event = "WTT / Table Tennis Tournament"
+            print(f"Extracted {len(lines)} raw text lines from page.")
 
-            # Regex pattern to match lines like: "Shim J. (Bra) - Haug B. (Nor) 0-3"
-            match_pattern = re.compile(
-                r"^([A-Za-z0-9\.\s\(\)\'-]+)\s+-\s+([A-Za-z0-9\.\s\(\)\'-]+)\s+([0-9]+-[0-9]+|\?:|\d{2}:\d{2})$"
-            )
+            current_event = "Table Tennis Circuit"
+            i = 0
+            while i < len(lines):
+                line = lines[i]
 
-            for line in lines:
-                # Update tournament title header if found
-                if "WTT " in line or "OTHERS" in line or "CUP" in line or "SERIES" in line:
+                # Update current tournament header
+                if any(kw in line.upper() for kw in ["WTT", "OTHERS", "CUP", "SERIES", "CHALLENGER", "PRO"]):
                     current_event = line.replace("OTHERSMEN:", "").strip()
-                    continue
 
-                # Test line against match pattern
-                m = match_pattern.search(line)
-                if m:
-                    p1 = m.group(1).strip()
-                    p2 = m.group(2).strip()
-                    score = m.group(3).strip()
+                # Detect match lines containing ' - ' or score lines
+                if " - " in line:
+                    # Case 1: Players on single line ("Player A - Player B")
+                    parts = line.split(" - ", 1)
+                    p1, p2 = parts[0].strip(), parts[1].strip()
+                    score = "-"
+
+                    # Check next line for score (e.g. "0-3" or "11:00")
+                    if i + 1 < len(lines) and re.search(r"^(\d+-\d+|\d{2}:\d{2}|\?:?)$", lines[i + 1]):
+                        score = lines[i + 1].strip()
+                        i += 1
 
                     matches.append({
                         "timestamp": timestamp,
@@ -67,8 +70,19 @@ def scrape_mobile_flashscore():
                         "total_p1_points": 0,
                         "total_p2_points": 0
                     })
+                i += 1
 
-            print(f"Cleanly parsed {len(matches)} real match rows.")
+            # Remove duplicates
+            unique_matches = []
+            seen = set()
+            for m in matches:
+                key = (m["player_1"], m["player_2"])
+                if key not in seen:
+                    seen.add(key)
+                    unique_matches.append(m)
+
+            matches = unique_matches[:15]
+            print(f"Successfully extracted {len(matches)} match entry/entries.")
 
         except Exception as e:
             print(f"Error scraping Flashscore: {e}")
@@ -93,11 +107,11 @@ def save_to_csv(matches):
             writer.writeheader()
         if matches:
             writer.writerows(matches)
-            print(f"Successfully appended {len(matches)} match rows to {CSV_FILE}.")
+            print(f"Successfully wrote {len(matches)} rows to {CSV_FILE}.")
         else:
-            print("No new matches captured during this cycle.")
+            print("No match data found on this run.")
 
 
 if __name__ == "__main__":
-    score_data = scrape_mobile_flashscore()
-    save_to_csv(score_data)
+    scores = scrape_mobile_flashscore()
+    save_to_csv(scores)
