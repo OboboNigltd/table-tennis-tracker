@@ -1,40 +1,63 @@
 import csv
+import json
 import os
-import requests
-from datetime import datetime
+import time
+from datetime import datetime, timezone
+from playwright.sync_api import sync_playwright
 
 CSV_FILE = "table_tennis_scores.csv"
 
-def fetch_sofascore_table_tennis():
+def fetch_sofascore_table_tennis_via_browser():
     """
-    Fetches live and completed table tennis events from Sofascore's public REST API.
-    Includes full-time scores, set-by-set breakdowns, and player details.
+    Launches Playwright Chromium to bypass Cloudflare 403 blocks,
+    navigates to Sofascore, and executes the API fetch inside the browser session.
     """
-    url = "https://api.sofascore.com/api/v1/sport/table-tennis/events/live"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.sofascore.com/",
-        "Origin": "https://www.sofascore.com"
-    }
+    events = []
+    
+    with sync_playwright() as p:
+        print("Launching Playwright browser session...")
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 720}
+        )
+        page = context.new_page()
 
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            events = data.get("events", [])
-            print(f"Retrieved {len(events)} live/recent table tennis matches from Sofascore.")
-            return events
-        else:
-            print(f"Sofascore endpoint returned status code: {response.status_code}")
-            return []
-    except Exception as e:
-        print(f"Connection error fetching Sofascore feed: {e}")
-        return []
+        try:
+            # 1. Visit main site to establish Cloudflare cookies and session
+            print("Navigating to Sofascore to clear Cloudflare checks...")
+            page.goto("https://www.sofascore.com/table-tennis", timeout=30000, wait_until="domcontentloaded")
+            time.sleep(3)
+
+            # 2. Execute fetch inside the browser context
+            print("Fetching live table tennis event payload...")
+            api_url = "https://api.sofascore.com/api/v1/sport/table-tennis/events/live"
+            
+            raw_response = page.evaluate(f"""
+                async () => {{
+                    const res = await fetch('{api_url}');
+                    if (!res.ok) return null;
+                    return await res.json();
+                }}
+            """)
+
+            if raw_response and "events" in raw_response:
+                events = raw_response["events"]
+                print(f"Successfully retrieved {len(events)} live/recent table tennis matches!")
+            else:
+                print("API fetch completed but returned no active events.")
+
+        except Exception as e:
+            print(f"Browser execution error: {e}")
+
+        browser.close()
+
+    return events
+
 
 def parse_sofascore_events(events):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    # Using timezone-aware UTC datetime to eliminate DeprecationWarning
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     parsed_matches = []
 
     for event in events:
@@ -50,7 +73,7 @@ def parse_sofascore_events(events):
         away_score = event.get("awayScore", {}).get("current", 0)
         full_time_score = f"{home_score}-{away_score}"
 
-        # Individual set breakdown
+        # Set-by-set breakdown
         home_period = event.get("homeScore", {})
         away_period = event.get("awayScore", {})
 
@@ -60,7 +83,7 @@ def parse_sofascore_events(events):
         set_4 = f"{home_period.get('period4', '-')}-{away_period.get('period4', '-')}" if 'period4' in home_period else "-"
         set_5 = f"{home_period.get('period5', '-')}-{away_period.get('period5', '-')}" if 'period5' in home_period else "-"
 
-        # Calculate sum of points scored per player
+        # Calculate sum of points scored per player across completed sets
         p1_pts = sum([home_period.get(f'period{i}', 0) for i in range(1, 6) if isinstance(home_period.get(f'period{i}'), int)])
         p2_pts = sum([away_period.get(f'period{i}', 0) for i in range(1, 6) if isinstance(away_period.get(f'period{i}'), int)])
 
@@ -81,6 +104,7 @@ def parse_sofascore_events(events):
 
     return parsed_matches
 
+
 def save_to_csv(matches):
     fieldnames = [
         "timestamp", "event", "player_1", "player_2", 
@@ -98,9 +122,10 @@ def save_to_csv(matches):
             writer.writerows(matches)
             print(f"Successfully recorded {len(matches)} match rows to {CSV_FILE}.")
         else:
-            print("No match rows retrieved on this cycle.")
+            print("No new match rows retrieved on this cycle.")
+
 
 if __name__ == "__main__":
-    raw_events = fetch_sofascore_table_tennis()
+    raw_events = fetch_sofascore_table_tennis_via_browser()
     processed_matches = parse_sofascore_events(raw_events)
     save_to_csv(processed_matches)
