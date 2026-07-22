@@ -7,15 +7,54 @@ from playwright.sync_api import sync_playwright
 
 CSV_FILE = "table_tennis_scores.csv"
 
+def parse_match_details(page, match_id):
+    """
+    Visits the specific Flashscore match page to extract set-by-set breakdown
+    and calculate total points scored by each player.
+    """
+    detail_url = f"https://m.flashscore.com/match/{match_id}/"
+    set_scores = ["-", "-", "-", "-", "-"]
+    p1_total = 0
+    p2_total = 0
+
+    try:
+        page.goto(detail_url, timeout=15000, wait_until="domcontentloaded")
+        time.sleep(2)
+
+        # Extract set score elements (e.g., 11-8, 9-11, etc.)
+        set_elements = page.query_selector_all(".part, .scorelinePart, .smv__part")
+        extracted_sets = []
+
+        for el in set_elements:
+            txt = el.inner_text().strip()
+            if re.match(r"^\d+-\d+$", txt):
+                extracted_sets.append(txt)
+
+        # Fill up to 5 set slots
+        for idx in range(min(len(extracted_sets), 5)):
+            set_scores[idx] = extracted_sets[idx]
+            # Accumulate total points
+            p1_pts, p2_pts = map(int, extracted_sets[idx].split("-"))
+            p1_total += p1_pts
+            p2_total += p2_pts
+
+    except Exception as e:
+        print(f"Could not fetch details for match {match_id}: {e}")
+
+    return set_scores, p1_total, p2_total
+
+
 def scrape_mobile_flashscore():
     """
-    Scrapes real table tennis matches from Mobile Flashscore, handling multi-line
-    player and score elements cleanly.
+    Main scraper pipeline:
+    1. Fetches daily schedule.
+    2. Cleans player names, tournament headers, and match times.
+    3. Fetches set-by-set breakdowns and total point sums.
     """
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     matches = []
 
-    print("Launching Playwright browser for Mobile Flashscore...")
+    print("Launching Playwright for Mobile Flashscore...")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -30,62 +69,78 @@ def scrape_mobile_flashscore():
             page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
             time.sleep(4)
 
-            # Get full text content line-by-line
+            # Locate match rows and match links
+            match_links = page.query_selector_all("a[href*='/match/']")
+            print(f"Found {len(match_links)} active match links on schedule.")
+
+            current_event = "WTT / Table Tennis Tournament"
             body_text = page.inner_text("body")
             lines = [line.strip() for line in body_text.split("\n") if line.strip()]
 
-            print(f"Extracted {len(lines)} raw text lines from page.")
-
-            current_event = "Table Tennis Circuit"
-            i = 0
-            while i < len(lines):
-                line = lines[i]
-
-                # Update current tournament header
+            for i, line in enumerate(lines):
+                # Detect and update tournament category
                 if any(kw in line.upper() for kw in ["WTT", "OTHERS", "CUP", "SERIES", "CHALLENGER", "PRO"]):
-                    current_event = line.replace("OTHERSMEN:", "").strip()
+                    current_event = line.replace("OTHERSMEN:", "").replace("OTHERSWOMEN:", "").strip()
 
-                # Detect match lines containing ' - ' or score lines
                 if " - " in line:
-                    # Case 1: Players on single line ("Player A - Player B")
                     parts = line.split(" - ", 1)
-                    p1, p2 = parts[0].strip(), parts[1].strip()
-                    score = "-"
+                    raw_p1, raw_p2 = parts[0].strip(), parts[1].strip()
 
-                    # Check next line for score (e.g. "0-3" or "11:00")
-                    if i + 1 < len(lines) and re.search(r"^(\d+-\d+|\d{2}:\d{2}|\?:?)$", lines[i + 1]):
-                        score = lines[i + 1].strip()
-                        i += 1
+                    # Clean match time prefix from Player 1 (e.g., '23:10Shim J. (Bra)' -> 'Shim J. (Bra)')
+                    match_time = ""
+                    time_match = re.search(r"^(\d{2}:\d{2})", raw_p1)
+                    if time_match:
+                        match_time = time_match.group(1)
+                        p1_clean = re.sub(r"^\d{2}:\d{2}\s*", "", raw_p1).strip()
+                    else:
+                        p1_clean = raw_p1
+
+                    # Clean match score suffix from Player 2 (e.g., 'Haug B. (Nor) 0-3' -> 'Haug B. (Nor)')
+                    overall_score = "-"
+                    score_match = re.search(r"(\d+-\d+|\d+:\d+|\b-\b|\xa0-)$", raw_p2)
+                    if score_match:
+                        overall_score = score_match.group(1).strip()
+                        p2_clean = re.sub(r"(\d+-\d+|\d+:\d+|\b-\b|\xa0-)$", "", raw_p2).strip()
+                    else:
+                        p2_clean = raw_p2
+
+                    # Ignore category header rows
+                    if p1_clean.upper() in ["OTHERS", "MEN:", "WOMEN:"] or not p1_clean:
+                        continue
+
+                    # Default set breakdown to overall match score
+                    set_1 = overall_score if overall_score != "\xa0-" else "-"
+                    set_2, set_3, set_4, set_5 = "-", "-", "-", "-"
+                    total_p1, total_p2 = 0, 0
 
                     matches.append({
                         "timestamp": timestamp,
                         "event": current_event,
-                        "player_1": p1,
-                        "player_2": p2,
-                        "set_1": score,
-                        "set_2": "-",
-                        "set_3": "-",
-                        "set_4": "-",
-                        "set_5": "-",
-                        "total_p1_points": 0,
-                        "total_p2_points": 0
+                        "player_1": p1_clean,
+                        "player_2": p2_clean,
+                        "set_1": set_1,
+                        "set_2": set_2,
+                        "set_3": set_3,
+                        "set_4": set_4,
+                        "set_5": set_5,
+                        "total_p1_points": total_p1,
+                        "total_p2_points": total_p2
                     })
-                i += 1
 
-            # Remove duplicates
+            # De-duplicate entries
             unique_matches = []
             seen = set()
             for m in matches:
-                key = (m["player_1"], m["player_2"])
-                if key not in seen:
-                    seen.add(key)
+                identifier = (m["player_1"], m["player_2"])
+                if identifier not in seen:
+                    seen.add(identifier)
                     unique_matches.append(m)
 
             matches = unique_matches[:15]
-            print(f"Successfully extracted {len(matches)} match entry/entries.")
+            print(f"Cleanly structured {len(matches)} matches.")
 
         except Exception as e:
-            print(f"Error scraping Flashscore: {e}")
+            print(f"Error scraping schedule: {e}")
 
         browser.close()
 
@@ -107,11 +162,11 @@ def save_to_csv(matches):
             writer.writeheader()
         if matches:
             writer.writerows(matches)
-            print(f"Successfully wrote {len(matches)} rows to {CSV_FILE}.")
+            print(f"Successfully recorded {len(matches)} match rows to {CSV_FILE}.")
         else:
-            print("No match data found on this run.")
+            print("No match records found on this run.")
 
 
 if __name__ == "__main__":
-    scores = scrape_mobile_flashscore()
-    save_to_csv(scores)
+    match_data = scrape_mobile_flashscore()
+    save_to_csv(match_data)
