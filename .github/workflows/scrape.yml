@@ -1,10 +1,9 @@
-name: Table Tennis Flashscore Scraper
+name: Table Tennis Flashscore LLM Scraper
 
 on:
   schedule:
-    # Runs automatically every 15 minutes
     - cron: '*/15 * * * *'
-  workflow_dispatch: # Allows manual run anytime
+  workflow_dispatch:
 
 jobs:
   run-scraper:
@@ -22,10 +21,12 @@ jobs:
       - name: Install dependencies and Playwright
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 playwright
+          pip install requests playwright google-genai
           playwright install chromium
 
-      - name: Run Flashscore Scraper Script
+      - name: Run LLM-in-the-Loop Scraper
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scraper.py
 
       - name: Commit and save updated CSV file
@@ -33,4 +34,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add table_tennis_scores.csv
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-updated table tennis scores via Flashscore" && git push)
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-updated table tennis scores via LLM Scraper" && git push)
