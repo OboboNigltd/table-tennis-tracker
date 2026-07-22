@@ -1,110 +1,87 @@
 import csv
 import os
-import re
 import time
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
 CSV_FILE = "table_tennis_scores.csv"
 
-def get_live_table_tennis_urls(page):
+def scrape_mobile_flashscore():
     """
-    STAGE 1: URL GENERATOR
-    Navigates to Flashscore Table Tennis and extracts match IDs/URLs.
-    """
-    print("Navigating to Flashscore Table Tennis schedule...")
-    url = "https://www.flashscore.com/table-tennis/"
-    page.goto(url, timeout=45000)
-    time.sleep(5)  # Wait for dynamic JS rendering
-
-    # Extract match IDs from DOM elements
-    match_elements = page.query_selector_all("[id^='g_1_'], [id^='g_11_']")
-    match_urls = []
-
-    for elem in match_elements[:10]:  # Limit to top 10 matches per run
-        element_id = elem.get_attribute("id")
-        if element_id:
-            # Clean ID string (e.g., 'g_1_XyZ123' -> 'XyZ123')
-            clean_id = re.sub(r"^g_\d+_", "", element_id)
-            match_url = f"https://www.flashscore.com/match/table-tennis/{clean_id}/"
-            match_urls.append((clean_id, match_url))
-
-    print(f"URL Generator discovered {len(match_urls)} active match URLs.")
-    return match_urls
-
-
-def scrape_match_details(page, match_id, match_url):
-    """
-    STAGE 2: SCRAPER ENGINE
-    Opens each match URL and extracts structured set scores and player names.
+    Scrapes live and finished table tennis scores directly from Mobile Flashscore.
+    Bypasses dynamic script walls and cookie banners.
     """
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"Scraping match ID: {match_id} -> {match_url}")
+    matches = []
 
-    try:
-        page.goto(match_url, timeout=30000)
-        time.sleep(3)
-
-        # Extract Player / Participant Names
-        home_el = page.query_selector(".duelParticipant__home .participant__participantName")
-        away_el = page.query_selector(".duelParticipant__away .participant__participantName")
-
-        p1_name = home_el.inner_text().strip() if home_el else "Player A"
-        p2_name = away_el.inner_text().strip() if away_el else "Player B"
-
-        # Extract Tournament Name
-        event_el = page.query_selector(".tournamentHeader__country")
-        event_name = event_el.inner_text().strip() if event_el else "Table Tennis Tournament"
-
-        # Extract Set Scores
-        p1_sets = page.query_selector_all(".smv__homeResult")
-        p2_sets = page.query_selector_all(".smv__awayResult")
-
-        set_1 = f"{p1_sets[0].inner_text()}-{p2_sets[0].inner_text()}" if len(p1_sets) > 0 else "-"
-        set_2 = f"{p1_sets[1].inner_text()}-{p2_sets[1].inner_text()}" if len(p1_sets) > 1 else "-"
-        set_3 = f"{p1_sets[2].inner_text()}-{p2_sets[2].inner_text()}" if len(p1_sets) > 2 else "-"
-        set_4 = f"{p1_sets[3].inner_text()}-{p2_sets[3].inner_text()}" if len(p1_sets) > 3 else "-"
-        set_5 = f"{p1_sets[4].inner_text()}-{p2_sets[4].inner_text()}" if len(p1_sets) > 4 else "-"
-
-        return {
-            "timestamp": timestamp,
-            "event": event_name,
-            "player_1": p1_name,
-            "player_2": p2_name,
-            "set_1": set_1,
-            "set_2": set_2,
-            "set_3": set_3,
-            "set_4": set_4,
-            "set_5": set_5,
-            "total_p1_points": 0,
-            "total_p2_points": 0
-        }
-
-    except Exception as e:
-        print(f"Error scraping match {match_id}: {e}")
-        return None
-
-
-def run_pipeline():
-    matches_data = []
-
+    print("Launching Playwright browser for Mobile Flashscore...")
     with sync_playwright() as p:
+        # Launch headless browser with mobile emulation settings
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+        )
         page = context.new_page()
 
-        # Step 1: Discover URLs
-        urls = get_live_table_tennis_urls(page)
+        # Mobile Flashscore table tennis schedule
+        target_url = "https://m.flashscore.com/table-tennis/"
+        print(f"Navigating to {target_url}...")
+        
+        try:
+            page.goto(target_url, timeout=30000, wait_until="domcontentloaded")
+            time.sleep(3)
 
-        # Step 2: Scrape each URL
-        for match_id, match_url in urls:
-            match_info = scrape_match_details(page, match_id, match_url)
-            if match_info:
-                matches_data.append(match_info)
+            # Locate match items on the mobile page structure
+            match_nodes = page.query_selector_all("#score-data > div, .scoreline, tr")
+            print(f"Scanning DOM elements... Found {len(match_nodes)} candidate match rows.")
+
+            # Extract raw text lines from the match table
+            page_content = page.content()
+            
+            # Extract player names and scores from mobile DOM
+            rows = page.query_selector_all("div")
+            for row in rows:
+                text = row.inner_text().strip()
+                # Check for table tennis match format (e.g. "Player 1 - Player 2 3-1")
+                if " - " in text and any(char.isdigit() for char in text):
+                    parts = text.split("\n")
+                    if len(parts) >= 2:
+                        players_line = parts[0]
+                        score_line = parts[1] if len(parts) > 1 else "-"
+
+                        if " - " in players_line:
+                            p1, p2 = players_line.split(" - ", 1)
+                            matches.append({
+                                "timestamp": timestamp,
+                                "event": "Flashscore Mobile Stream",
+                                "player_1": p1.strip(),
+                                "player_2": p2.strip(),
+                                "set_1": score_line.strip(),
+                                "set_2": "-",
+                                "set_3": "-",
+                                "set_4": "-",
+                                "set_5": "-",
+                                "total_p1_points": 0,
+                                "total_p2_points": 0
+                            })
+
+            # De-duplicate entries
+            unique_matches = []
+            seen = set()
+            for m in matches:
+                identifier = (m["player_1"], m["player_2"], m["set_1"])
+                if identifier not in seen and m["player_1"] != "Player A":
+                    seen.add(identifier)
+                    unique_matches.append(m)
+
+            matches = unique_matches[:10]
+
+        except Exception as e:
+            print(f"Error fetching Mobile Flashscore: {e}")
 
         browser.close()
 
-    return matches_data
+    return matches
 
 
 def save_to_csv(matches):
@@ -122,11 +99,11 @@ def save_to_csv(matches):
             writer.writeheader()
         if matches:
             writer.writerows(matches)
-            print(f"Successfully recorded {len(matches)} match entry/entries into {CSV_FILE}.")
+            print(f"Successfully recorded {len(matches)} real match entry/entries.")
         else:
-            print("No match data extracted in this run.")
+            print("No new match entries extracted on this pass.")
 
 
 if __name__ == "__main__":
-    extracted_matches = run_pipeline()
-    save_to_csv(extracted_matches)
+    real_matches = scrape_mobile_flashscore()
+    save_to_csv(real_matches)
